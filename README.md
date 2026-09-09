@@ -1,11 +1,43 @@
-# TNM031
+# TNM031 - Network Programming and Security
 
-This repository is my own implementation for Lab 2 and 3 in the course Network Programming and Security - TNM031 at LIU. Lab 1 and 4 are not implemented here since the first one was simply answering theory based on network responses using wire-shark, and lab4 is more of a miniproject, which will have its' own repo when I get to that lab. 
+This repository is for my implementations of Labs 2 and 3 in the course **Network Programming and Security (TNM031)** at Linköping University (LiU).
 
-## Lab2
-Lab 2 was about RSA encryption, and one enforced rule was to implement it in Java. To run the solution, simply clone the repo, then using a terminal make the Lab2 folder your working directory. Afterwards run these commands in sequence:
-* javac Main.java RSA.java KeyPair.java Key.java
-* java Main
+Lab 1 covers theory questions based on network traffic inspected with Wireshark and is not included here. Lab 4 is a mini-project that will have its own repository.
 
-## Lab3 
-This lab is yet to be implemented.
+## Lab 2 - RSA in Java
+
+Lab 2 requires an implementation of RSA in Java. The program generates a public/private key pair, encrypts a text message, decrypts it, and checks whether the recovered text matches the original.
+
+### Requirements
+
+A Java Development Kit (JDK) with both `javac` and `java` available in your terminal. The project has been verified with **Eclipse Temurin JDK 21.0.9** and uses only Java's standard library.
+
+### Build and run
+
+After cloning the repository, open a terminal in the repository root and run:
+
+```powershell
+cd Lab2
+javac Main.java RSA.java KeyPair.java Key.java
+java Main
+```
+
+The program prints the original message, the encrypted number, and the recovered message. The supplied example should finish with:
+
+```text
+The original and recovered messages are the same: true
+```
+
+Each run generates new keys, so the encrypted number changes. To try another message, edit the `message` string in [`Lab2/Main.java`](Lab2/Main.java), then recompile and run from the `Lab2` directory.
+
+### Current status
+
+The demonstration works for the supplied message. The following limitations remain:
+
+- Text reconstruction needs fixes for messages beginning with accented characters or emoji, empty messages, and original leading null characters (`U+0000`).
+- Messages must fit in one RSA block. The program rejects messages whose encoded integer is at least the key's modulus.
+- This is educational textbook RSA; it does not implement an encryption encoding scheme such as RSA-OAEP.
+
+## Lab 3
+
+Planned; not yet implemented.
