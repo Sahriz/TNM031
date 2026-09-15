@@ -2,14 +2,14 @@ import java.math.BigInteger;
 
 public class Main{
     public static void main(String[] args){
-        KeyPair keys = RSA.generateKeyPair();
+        KeyPair keys = RSA.generateKeyPair(); //Generate both the private key and the public key used for encryption and decryption.
 
-        //encryption
-        String message = "Hello, World! Goodbye, Venus? And hello to all the other celestial bodies, except Pluto.";
+        String message = "Jag äslkar dig!    s"; //message to encrypt and decrypt
 
-        BigInteger cipherTextValue = RSA.encrypt(message, keys.publicKey);
-        String recoveredString = RSA.decrypt(cipherTextValue, keys.privateKey);
+        BigInteger cipherTextValue = RSA.encrypt(message, keys.publicKey); //encryption
+        String recoveredString = RSA.decrypt(cipherTextValue, keys.privateKey); //decryption
 
+        //Testing
         System.out.println("Orginal: " + message);
         System.out.println("Encrypted: " + cipherTextValue);
         System.out.println("Recovered message: " + recoveredString);

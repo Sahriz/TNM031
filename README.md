@@ -30,12 +30,13 @@ The original and recovered messages are the same: true
 
 Each run generates new keys, so the encrypted number changes. To try another message, edit the `message` string in [`Lab2/Main.java`](Lab2/Main.java), then recompile and run from the `Lab2` directory.
 
-### Current status
+### Text encoding and limits
 
-The demonstration works for the supplied message. The following limitations remain:
+Text encryption and decryption handle accented characters, emoji, empty messages, and leading, embedded, or trailing null characters (`U+0000`). A leading marker byte (`0x01`) preserves the original UTF-8 bytes during conversion to and from `BigInteger`. Decryption removes the marker before decoding the text.
 
-- Text reconstruction needs fixes for messages beginning with accented characters or emoji, empty messages, and original leading null characters (`U+0000`).
-- Messages must fit in one RSA block. The program rejects messages whose encoded integer is at least the key's modulus.
+The following limitations remain:
+
+- Messages must fit in one RSA block. The program rejects messages whose encoded integer, including the marker, is at least the key's modulus.
 - This is educational textbook RSA; it does not implement an encryption encoding scheme such as RSA-OAEP.
 
 ## Lab 3
