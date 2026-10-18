@@ -22,3 +22,10 @@
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+# Lab 3 local credentials, builds, and transferred data
+/SecureAdditionServer/**/*.ks
+/SecureAdditionServer/**/*.cer
+/SecureAdditionServer/out/
+/SecureAdditionServer/server/files/
+/SecureAdditionServer/client/downloads/

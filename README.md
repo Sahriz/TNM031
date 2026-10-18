@@ -39,6 +39,6 @@ The following limitations remain:
 - Messages must fit in one RSA block. The program rejects messages whose encoded integer, including the marker, is at least the key's modulus.
 - This is educational textbook RSA; it does not implement an encryption encoding scheme such as RSA-OAEP.
 
-## Lab 3
+## Lab 3 - Secure file transfer
 
-Planned; not yet implemented.
+The original client and server now support upload, download, and deletion over mutually authenticated TLS. See [the Lab 3 README](SecureAdditionServer/README.md) for setup, commands, the protocol, and how the implementation satisfies the six lab security conditions.

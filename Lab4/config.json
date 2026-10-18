@@ -1,0 +1,20 @@
+{
+  "port_scan": {
+    "window": 300,
+    "threshold": 30,
+    "hold": 30.0,
+    "severity": "medium"
+  },
+  "syn_flood": {
+    "window": 5,
+    "threshold": 100,
+    "min_incomplete_ratio": 0.8,
+    "hold": 30.0,
+    "severity": "high"
+  },
+  "arp_spoof": {
+    "stale_after": 5,
+    "hold": 60.0
+  },
+  "allowlist": {}
+}

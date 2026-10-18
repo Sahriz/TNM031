@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+data/
+alerts.jsonl
+status.json
+sweep.csv
+frontend/node_modules/
+frontend/dist/
+frontend/public/reports/
+frontend/.vite/
+frontend/.npm-cache/
