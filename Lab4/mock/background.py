@@ -10,53 +10,57 @@ CLOSED_PORTS = (21, 23, 3306, 8080, 8443)
 MEAN_GAP = 8.0  # seconds between one client's activities
 
 
-def background(f: Frames, start: float, end: float) -> None:
-    net, rng = f.net, f.rng
-    names = list(zip(DOMAINS, net.external_web))
+def background(frame_builder: Frames, start: float, end: float) -> None:
+    network, random_generator = frame_builder.network, frame_builder.random_generator
+    names = list(zip(DOMAINS, network.external_web))
 
-    for host in net.hosts.values():
-        if host is net.gateway:
+    for host in network.hosts.values():
+        if host is network.gateway:
             continue
-        low, high = (200.0, 400.0) if host is net.printer else (30.0, 90.0)
-        t = start + rng.uniform(0.05, 3.0)
-        while t < end:
-            if host.online(t):
-                if rng.random() < 0.7:
-                    f.arp_exchange(t, host, net.gateway)
+        low, high = (200.0, 400.0) if host is network.printer else (30.0, 90.0)
+        timestamp = start + random_generator.uniform(0.05, 3.0)
+        while timestamp < end:
+            if host.online(timestamp):
+                if random_generator.random() < 0.7:
+                    frame_builder.arp_exchange(timestamp, host, network.gateway)
                 else:
-                    f.arp_exchange(t, net.gateway, host)
-            t += rng.uniform(low, high)
+                    frame_builder.arp_exchange(timestamp, network.gateway, host)
+            timestamp += random_generator.uniform(low, high)
 
-    for client in net.clients:
-        t = start + 3.0 + rng.expovariate(1 / MEAN_GAP)
-        while t < end:
-            if client.online(t) and client.online(t + 2.0):
-                _activity(f, t, client.ip, names)
-            t += rng.expovariate(1 / MEAN_GAP)
+    for client in network.clients:
+        timestamp = start + 3.0 + random_generator.expovariate(1 / MEAN_GAP)
+        while timestamp < end:
+            if client.online(timestamp) and client.online(timestamp + 2.0):
+                _activity(frame_builder, timestamp, client.ip, names)
+            timestamp += random_generator.expovariate(1 / MEAN_GAP)
 
 
-def _activity(f: Frames, t: float, client: str, names: list) -> None:
-    net, rng = f.net, f.rng
-    roll = rng.random()
+def _activity(frame_builder: Frames, timestamp: float, client: str, names: list) -> None:
+    network, random_generator = frame_builder.network, frame_builder.random_generator
+    roll = random_generator.random()
     if roll < 0.55:
-        name, ip = rng.choice(names)
-        t = f.dns(t, client, net.dns.ip, name, ip)
-        f.session(t + rng.uniform(0.001, 0.02), client, ip, 443,
-                  tls_record(rng, rng.randrange(200, 600)), tls_records(rng, rng.randint(1, 4)))
+        name, ip = random_generator.choice(names)
+        timestamp = frame_builder.dns(timestamp, client, network.dns.ip, name, ip)
+        frame_builder.session(timestamp + random_generator.uniform(0.001, 0.02), client, ip, 443,
+                  tls_record(random_generator, random_generator.randrange(200, 600)),
+                      tls_records(random_generator, random_generator.randint(1, 4)))
     elif roll < 0.68:
-        f.session(t, client, net.web.ip, 80, http_request("web.lan", f"/page{rng.randrange(50)}"),
-                  http_response(rng, rng.randrange(200, 4000)))
+        frame_builder.session(timestamp, client, network.web.ip, 80, http_request("web.lan",
+            f"/page{random_generator.randrange(50)}"),
+                  http_response(random_generator, random_generator.randrange(200, 4000)))
     elif roll < 0.80:
-        f.session(t, client, net.web.ip, 443,
-                  tls_record(rng, rng.randrange(200, 600)), tls_records(rng, rng.randint(1, 3)))
+        frame_builder.session(timestamp, client, network.web.ip, 443,
+                  tls_record(random_generator, random_generator.randrange(200, 600)),
+                      tls_records(random_generator, random_generator.randint(1, 3)))
     elif roll < 0.90:
-        f.session(t, client, net.files.ip, 9000,
-                  rng.randbytes(rng.randrange(40, 200)), [rng.randbytes(rng.randrange(100, 1400))])
+        frame_builder.session(timestamp, client, network.files.ip, 9000,
+                  random_generator.randbytes(random_generator.randrange(40, 200)),
+                      [random_generator.randbytes(random_generator.randrange(100, 1400))])
     elif roll < 0.95:
-        name, ip = rng.choice(names)
-        f.dns(t, client, net.dns.ip, name, ip)
+        name, ip = random_generator.choice(names)
+        frame_builder.dns(timestamp, client, network.dns.ip, name, ip)
     elif roll < 0.98:
-        server = rng.choice((net.web, net.files, net.dns))
-        f.refused(t, client, server.ip, rng.choice(CLOSED_PORTS))
+        server = random_generator.choice((network.web, network.files, network.dns))
+        frame_builder.refused(timestamp, client, server.ip, random_generator.choice(CLOSED_PORTS))
     else:
-        f.unanswered(t, client, rng.choice(net.external_web), 443)
+        frame_builder.unanswered(timestamp, client, random_generator.choice(network.external_web), 443)

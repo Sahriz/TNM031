@@ -13,33 +13,38 @@ from ids.packets import ACK, FIN, RST, SYN, TCP_KIND, decode
 
 
 def summarize(path: str, t_from: float = 0.0, t_to: float = float("inf")) -> dict:
+    # Summarize protocol mix, rates and connection-attempt breadth using the same
+    # measurements for generated and recorded captures. --from/--to select an
+    # interval relative to the first packet. These describe traffic composition;
+    # detection accuracy is measured separately by evaluate.py against labels.
     kinds, flags = Counter(), Counter()
     per_second = Counter()
     syn_per_second = Counter()
     ports_per_source_second = defaultdict(set)
     first = last = None
     with PcapReader(path) as reader:
-        for pkt in reader:
-            p = decode(pkt)
+        for captured_packet in reader:
+            packet_info = decode(captured_packet)
             if first is None:
-                first = p.ts
-            offset = p.ts - first
+                first = packet_info.timestamp
+            offset = packet_info.timestamp - first
             if not t_from <= offset < t_to:
                 continue
-            last = p.ts
+            last = packet_info.timestamp
             second = int(offset)
-            kinds[p.kind] += 1
+            kinds[packet_info.kind] += 1
             per_second[second] += 1
-            if p.kind != TCP_KIND:
+            if packet_info.kind != TCP_KIND:
                 continue
-            if p.flags & SYN:
-                flags["syn_ack" if p.flags & ACK else "syn"] += 1
-                if not p.flags & ACK:
+            if packet_info.flags & SYN:
+                flags["syn_ack" if packet_info.flags & ACK else "syn"] += 1
+                if not packet_info.flags & ACK:
                     syn_per_second[second] += 1
-                    ports_per_source_second[(p.src_ip, second)].add((p.dst_ip, p.dport))
-            elif p.flags & RST:
+                    ports_per_source_second[(packet_info.source_ip, second)].add((packet_info.destination_ip,
+                        packet_info.destination_port))
+            elif packet_info.flags & RST:
                 flags["rst"] += 1
-            elif p.flags & FIN:
+            elif packet_info.flags & FIN:
                 flags["fin"] += 1
     total = sum(kinds.values())
     duration = max((last - first - t_from) if total else 0.0, 1e-9)
@@ -59,23 +64,23 @@ def main() -> None:
     parser.add_argument("pcap")
     parser.add_argument("--from", dest="t_from", type=float, default=0.0, help="seconds from the first packet")
     parser.add_argument("--to", dest="t_to", type=float, default=float("inf"))
-    args = parser.parse_args()
+    arguments = parser.parse_args()
 
-    s = summarize(args.pcap, args.t_from, args.t_to)
-    total = max(s["packets"], 1)
-    print(f"packets            {s['packets']}")
-    print(f"duration           {s['duration']:.1f} s")
-    print(f"mean rate          {s['packets'] / s['duration']:.1f} packets/s (peak {s['peak_pps']})")
-    for kind, count in s["kinds"].most_common():
+    statistics = summarize(arguments.pcap, arguments.t_from, arguments.t_to)
+    total = max(statistics["packets"], 1)
+    print(f"packets            {statistics['packets']}")
+    print(f"duration           {statistics['duration']:.1f} s")
+    print(f"mean rate          {statistics['packets'] / statistics['duration']:.1f} packets/s (peak {statistics['peak_pps']})")
+    for kind, count in statistics["kinds"].most_common():
         print(f"  {kind:<16} {count:7d}  {100 * count / total:5.1f} %")
-    tcp = max(s["kinds"].get(TCP_KIND, 0), 1)
+    tcp = max(statistics["kinds"].get(TCP_KIND, 0), 1)
     for name in ("syn", "syn_ack", "rst", "fin"):
-        count = s["flags"].get(name, 0)
+        count = statistics["flags"].get(name, 0)
         print(f"  tcp {name:<12} {count:7d}  {100 * count / tcp:5.1f} % of TCP")
-    syn = s["flags"].get("syn", 0)
-    print(f"SYN-ACK per SYN    {s['flags'].get('syn_ack', 0) / syn:.2f}" if syn else "SYN-ACK per SYN    -")
-    print(f"peak SYN rate      {s['peak_syn_per_second']} /s")
-    print(f"peak distinct (host, port) per source per second  {s['peak_ports_per_source_second']}")
+    syn = statistics["flags"].get("syn", 0)
+    print(f"SYN-ACK per SYN    {statistics['flags'].get('syn_ack', 0) / syn:.2f}" if syn else "SYN-ACK per SYN    -")
+    print(f"peak SYN rate      {statistics['peak_syn_per_second']} /s")
+    print(f"peak distinct (host, port) per source per second  {statistics['peak_ports_per_source_second']}")
 
 
 if __name__ == "__main__":

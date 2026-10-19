@@ -15,6 +15,5 @@
   "arp_spoof": {
     "stale_after": 5,
     "hold": 60.0
-  },
-  "allowlist": {}
+  }
 }

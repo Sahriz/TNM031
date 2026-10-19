@@ -15,9 +15,9 @@ from ids.rules import Config
 def capture(tmp_path, times=(0, .2, .3, 1.2, 1.3, 8)):
     packets = []
     for i, t in enumerate(times):
-        pkt = Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / IP(src="10.0.0.2", dst="10.0.0.3") / TCP(sport=40000 + i, dport=80, flags="S")
-        pkt.time = 100 + t
-        packets.append(pkt)
+        captured_packet = Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / IP(src="10.0.0.2", dst="10.0.0.3") / TCP(sport=40000 + i, dport=80, flags="S")
+        captured_packet.time = 100 + t
+        packets.append(captured_packet)
     path = tmp_path / "sample.pcap"
     wrpcap(str(path), packets)
     return path
@@ -63,12 +63,12 @@ def test_labels_are_evaluated_using_existing_matching(tmp_path, config):
 
 def test_manifest_updates_without_duplicate_entries(tmp_path, config):
     path = capture(tmp_path)
-    out = tmp_path / "reports"
-    export([path], out, config)
-    export([path], out, config)
-    index = json.loads((out / "index.json").read_text())
+    outcome = tmp_path / "reports"
+    export([path], outcome, config)
+    export([path], outcome, config)
+    index = json.loads((outcome / "index.json").read_text())
     assert len(index) == 1
-    assert (out / index[0]["file"]).exists()
+    assert (outcome / index[0]["file"]).exists()
 
 
 @pytest.mark.parametrize("interval", [0, -1, float("nan")])
@@ -118,7 +118,7 @@ def test_packet_colors_do_not_leak_future_detection(tmp_path, config):
     ("tcp", ACK, 80, "ok"), ("tcp", SYN, 443, "ok"), ("udp", 0, 80, "ok")])
 def test_threat_color_only_matches_related_traffic(kind, flags, port, expected):
     flood = Alert(1, 0, "syn_flood", "single_source", "high", "10.0.0.2", "10.0.0.3", {"port": 80})
-    packet = PacketInfo(0, kind, src_ip="10.0.0.2", dst_ip="10.0.0.3", dport=port, flags=flags)
+    packet = PacketInfo(0, kind, source_ip="10.0.0.2", destination_ip="10.0.0.3", destination_port=port, flags=flags)
     assert packet_severity(packet, [flood]) == expected
 
 

@@ -21,62 +21,78 @@ SCANS = ("vertical", "sweep", "slow", "distributed")
 FLOODS = ("single_source", "spoofed", "low_rate")
 ARPS = ("mitm", "gratuitous", "quiet_host")
 
+# Synthetic data supplies known attack times and benign lookalikes.
+# It is reproducible test input, not proof that the detector handles real networks.
+# Frames are written to files; these functions do not transmit an attack.
+
 
 def build(seed: int, index: int = 0, duration: float = 420.0) -> tuple[list, dict]:
     """Returns (frames sorted by time, labels)."""
-    rng = random.Random(seed)
-    net = Network(rng)
-    f = Frames(net, rng)
+    # A seed reproduces the random choices. Changing the seed gives a different
+    # example; the file index rotates attack variants so the set covers more cases.
+    # Network defines hosts; Frames builds packets; attacks/lookalikes add events.
+    random_generator = random.Random(seed)
+    network = Network(random_generator)
+    frame_builder = Frames(network, random_generator)
     start, end = BASE_TIME, BASE_TIME + duration
-    attacker, victim, replaced, peer_client, backup_target = rng.sample(net.clients, 5)
-    scan_target = rng.choice((net.web, net.files, net.dns))
+    attacker, victim, replaced, peer_client, backup_target = random_generator.sample(network.clients, 5)
+    scan_target = random_generator.choice((network.web, network.files, network.dns))
     scan, flood, arp = SCANS[index % 4], FLOODS[index % 3], ARPS[(index + index // 3) % 3]
 
-    def scan_job(t):
+    def scan_job(timestamp):
         if scan == "vertical":
-            return attacks.vertical_scan(f, t, attacker, scan_target)
+            return attacks.vertical_scan(frame_builder, timestamp, attacker, scan_target)
         if scan == "sweep":
-            return attacks.sweep_scan(f, t, attacker)
+            return attacks.sweep_scan(frame_builder, timestamp, attacker)
         if scan == "slow":
-            return attacks.slow_scan(f, t, end, attacker, scan_target)
-        return attacks.distributed_scan(f, t, scan_target)
+            return attacks.slow_scan(frame_builder, timestamp, end, attacker, scan_target)
+        return attacks.distributed_scan(frame_builder, timestamp, scan_target)
 
-    def arp_job(t):
+    def arp_job(timestamp):
         if arp == "mitm":
-            return attacks.arp_mitm(f, t, attacker, victim, net.gateway)
-        target = net.printer if arp == "quiet_host" else rng.choice((net.web, net.files))
-        return attacks.arp_announce(f, t, attacker, target, arp)
+            return attacks.arp_mitm(frame_builder, timestamp, attacker, victim, network.gateway)
+        target = network.printer if arp == "quiet_host" else random_generator.choice((network.web, network.files))
+        return attacks.arp_announce(frame_builder, timestamp, attacker, target, arp)
 
     jobs = [
+        # One attack of each rule plus four benign lookalikes. Each callable takes
+        # its scheduled timestamp, adds packets and returns an event description.
         scan_job,
-        lambda t: attacks.syn_flood(f, t, net.web, 80, flood, attacker),
+        lambda timestamp: attacks.syn_flood(frame_builder, timestamp, network.web, 80, flood, attacker),
         arp_job,
-        lambda t: lookalikes.backup_job(f, t, net.files, backup_target),
-        lambda t: lookalikes.peer_discovery(f, t, peer_client),
-        lambda t: lookalikes.flash_crowd(f, t, net.web, 443),
-        lambda t: lookalikes.nic_replacement(f, t, replaced),
+        lambda timestamp: lookalikes.backup_job(frame_builder, timestamp, network.files, backup_target),
+        lambda timestamp: lookalikes.peer_discovery(frame_builder, timestamp, peer_client),
+        lambda timestamp: lookalikes.flash_crowd(frame_builder, timestamp, network.web, 443),
+        lambda timestamp: lookalikes.nic_replacement(frame_builder, timestamp, replaced),
     ]
-    rng.shuffle(jobs)
+    random_generator.shuffle(jobs)
     slot = (duration - 75.0) / len(jobs)
     events = []
-    for i, job in enumerate(jobs):
-        event = job(start + 15.0 + i * slot + rng.uniform(0, slot / 3))
-        event["id"] = f"e{i + 1}"
+    for index, job in enumerate(jobs):
+        event = job(start + 15.0 + index * slot + random_generator.uniform(0, slot / 3))
+        event["id"] = f"e{index + 1}"
         events.append(event)
 
-    background(f, start, end)
-    frames = sorted((p for p in f.out if p.time < end), key=lambda p: p.time)
+    # Plan events first so a replaced NIC's downtime is known to background().
+    # Jobs add packets out of order; sorting below restores capture-time order.
+    background(frame_builder, start, end)
+    frames = sorted((packet for packet in frame_builder.out if packet.time < end), key=lambda packet: packet.time)
     labels = {
+        # Labels describe intended events, participants and timing.
+        # run.py never reads them; evaluate.py uses them to check the detector.
         "seed": seed,
         "start": start,
         "duration": duration,
-        "hosts": {h.ip: {"name": h.name, "mac": h.mac} for h in net.hosts.values()},
+        "hosts": {host.ip: {"name": host.name, "mac": host.mac} for host in network.hosts.values()},
         "events": events,
     }
     return frames, labels
 
 
 def write(stem: Path, frames: list, labels: dict) -> None:
+    # The PCAP contains Ethernet frames, and the adjacent JSON
+    # contains ground truth. Scapy serializes packets and computes unset checksums.
+    # Ethernet linktype lets readers such as Wireshark decode the packet layers.
     with PcapWriter(str(stem.with_suffix(".pcap")), linktype=1) as writer:
         for frame in frames:
             writer.write(frame)
@@ -90,14 +106,17 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=8)
     parser.add_argument("--seed", type=int, required=True, help="seed of the first file")
     parser.add_argument("--duration", type=float, default=420.0, help="seconds per file")
-    args = parser.parse_args()
+    arguments = parser.parse_args()
 
-    args.out.mkdir(parents=True, exist_ok=True)
-    for index in range(args.count):
-        frames, labels = build(args.seed + index, index, args.duration)
-        stem = args.out / f"{args.out.name}_{index:02d}"
+    # Each file uses a different seed. README.md creates separate tuning and test
+    # folders; separation reduces direct tuning to test examples but both still
+    # share this generator and its assumptions.
+    arguments.out.mkdir(parents=True, exist_ok=True)
+    for index in range(arguments.count):
+        frames, labels = build(arguments.seed + index, index, arguments.duration)
+        stem = arguments.out / f"{arguments.out.name}_{index:02d}"
         write(stem, frames, labels)
-        kinds = ", ".join(f"{e['rule']}/{e['subtype']}" for e in labels["events"] if e["kind"] == "attack")
+        kinds = ", ".join(f"{event['rule']}/{event['subtype']}" for event in labels["events"] if event["kind"] == "attack")
         print(f"{stem.name}.pcap  {len(frames):6d} frames  {kinds}")
 
 

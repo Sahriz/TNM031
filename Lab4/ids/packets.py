@@ -10,52 +10,63 @@ TCP_KIND, UDP_KIND, ARP_KIND, OTHER_KIND = "tcp", "udp", "arp", "other"
 FIN, SYN, RST, PSH, ACK = 0x01, 0x02, 0x04, 0x08, 0x10
 
 
-@dataclass(slots=True)
+@dataclass
 class PacketInfo:
-    ts: float
+    # Header fields shared by state tracking, detection and playback.
+    # Scapy decodes packet formats; our state and rules interpret the behavior.
+    timestamp: float
     kind: str
-    src_mac: str | None = None
-    dst_mac: str | None = None
-    src_ip: str | None = None
-    dst_ip: str | None = None
-    sport: int = 0
-    dport: int = 0
+    source_mac: str | None = None
+    destination_mac: str | None = None
+    source_ip: str | None = None
+    destination_ip: str | None = None
+    source_port: int = 0
+    destination_port: int = 0
     flags: int = 0
-    arp_op: int = 0
-    arp_mac: str | None = None  # sender hardware address inside the ARP payload
+    arp_operation: int = 0
+    arp_sender_mac: str | None = None  # sender hardware address inside the ARP payload
 
 
-def decode(pkt) -> PacketInfo:
+def decode(captured_packet) -> PacketInfo:
     """Headers only: payloads are never read, so encrypted traffic decodes the same."""
-    info = PacketInfo(ts=float(pkt.time), kind=OTHER_KIND)
-    ether = pkt.getlayer(Ether)
-    if ether is not None:
-        info.src_mac = ether.src
-        info.dst_mac = ether.dst
+    # The three rules need addresses, ports, flags and timing,
+    # not application content. Ordinary TLS does not hide those outer headers;
+    # a tunnel or an incomplete capture can still hide the traffic we need.
+    packet_info = PacketInfo(timestamp=float(captured_packet.time), kind=OTHER_KIND)
+    ethernet_layer = captured_packet.getlayer(Ether)
+    if ethernet_layer is not None:
+        packet_info.source_mac = ethernet_layer.src
+        packet_info.destination_mac = ethernet_layer.dst
 
-    arp = pkt.getlayer(ARP)
+    arp = captured_packet.getlayer(ARP)
     if arp is not None:
-        info.kind = ARP_KIND
-        info.arp_op = arp.op
-        info.arp_mac = arp.hwsrc
-        info.src_ip = arp.psrc
-        info.dst_ip = arp.pdst
-        return info
+        # ARP says "this IP belongs to this MAC": psrc is the claimed sender IP
+        # and hwsrc the claimed hardware address. The Ethernet source is stored
+        # separately because an address claim is not proof of the sender's identity.
+        packet_info.kind = ARP_KIND
+        packet_info.arp_operation = arp.op
+        packet_info.arp_sender_mac = arp.hwsrc
+        packet_info.source_ip = arp.psrc
+        packet_info.destination_ip = arp.pdst
+        return packet_info
 
-    ip = pkt.getlayer(IP)
+    # This lookup handles IPv4, not IPv6. Other Ethernet traffic
+    # can still contribute MAC activity, but has no TCP/ARP detection rule here.
+    ip = captured_packet.getlayer(IP)
     if ip is None:
-        return info
-    info.src_ip = ip.src
-    info.dst_ip = ip.dst
+        return packet_info
+    packet_info.source_ip = ip.src
+    packet_info.destination_ip = ip.dst
 
-    l4 = ip.payload
-    if isinstance(l4, TCP):
-        info.kind = TCP_KIND
-        info.sport = l4.sport
-        info.dport = l4.dport
-        info.flags = int(l4.flags)
-    elif isinstance(l4, UDP):
-        info.kind = UDP_KIND
-        info.sport = l4.sport
-        info.dport = l4.dport
-    return info
+    transport_layer = ip.payload
+    if isinstance(transport_layer, TCP):
+        packet_info.kind = TCP_KIND
+        packet_info.source_port = transport_layer.sport
+        packet_info.destination_port = transport_layer.dport
+        packet_info.flags = int(transport_layer.flags)
+    elif isinstance(transport_layer, UDP):
+        # UDP fields support statistics and playback; there is no UDP scan rule.
+        packet_info.kind = UDP_KIND
+        packet_info.source_port = transport_layer.sport
+        packet_info.destination_port = transport_layer.dport
+    return packet_info

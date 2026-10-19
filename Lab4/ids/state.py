@@ -4,81 +4,93 @@ handshake progress, and the IP-to-MAC table."""
 from collections import deque
 
 
-class Conn:
-    """One SYN. Lives in its source's and its service's window until it expires."""
+class ConnectionAttempt:
+    """One SYN, shared by the source's scan window and the service's flood window."""
 
-    __slots__ = ("ts", "src", "dst", "dport", "synack", "established", "in_scan", "in_flood", "prev")
+    # Incomplete means "no completion observed yet", not "will fail".
+    # Each SYN counts as an attempt, including retransmissions. Sharing this object
+    # lets a later ACK update both views without re-reading the capture.
 
-    def __init__(self, ts: float, src: str, dst: str, dport: int):
-        self.ts = ts
-        self.src = src
-        self.dst = dst
-        self.dport = dport
-        self.synack = False
-        self.established = False
-        self.in_scan = False
-        self.in_flood = False
-        self.prev = None  # earlier SYN of the same 4-tuple (retransmission)
+    def __init__(self, timestamp: float, source_ip: str, destination_ip: str, destination_port: int):
+        self.timestamp = timestamp
+        self.source_ip = source_ip
+        self.destination_ip = destination_ip
+        self.destination_port = destination_port
+        self.syn_ack_seen = False
+        self.handshake_complete = False
+        self.in_scan_window = False
+        self.in_flood_window = False
+        self.previous_attempt = None  # An earlier SYN for the same connection.
 
 
 class SourceWindow:
-    """Connection attempts made by one source. `failed` maps each (host, port) the
-    source has an uncompleted attempt to, so len(failed) is the scan measure."""
+    """Attempts from one source, including distinct targets still incomplete."""
 
-    __slots__ = ("attempts", "failed")
+    # Scan breadth is the number of dictionary keys, each an
+    # (IP, port) pair. Values count outstanding attempts to that pair. Ten SYNs to
+    # the same port on the same host increase the value, but add only one key.
 
     def __init__(self):
         self.attempts = deque()
-        self.failed = {}
+        self.incomplete_targets = {}
 
-    def add(self, conn: Conn) -> None:
-        self.attempts.append(conn)
-        conn.in_scan = True
-        key = (conn.dst, conn.dport)
-        self.failed[key] = self.failed.get(key, 0) + 1
+    def add(self, connection: ConnectionAttempt) -> None:
+        self.attempts.append(connection)
+        connection.in_scan_window = True
+        key = (connection.destination_ip, connection.destination_port)
+        self.incomplete_targets[key] = self.incomplete_targets.get(key, 0) + 1
 
     def expire(self, cutoff: float) -> None:
+        # A sliding window drops attempts older than now - window.
+        # The deque is ordered by capture time, so the oldest entry is at the left.
+        # An entry exactly at the cutoff stays until the next time advance.
+        # This assumes chronological input; mock/generate.py sorts its packets.
         attempts = self.attempts
-        while attempts and attempts[0].ts < cutoff:
-            conn = attempts.popleft()
-            conn.in_scan = False
-            if not conn.established:
-                self.completed(conn)
+        while attempts and attempts[0].timestamp < cutoff:
+            connection = attempts.popleft()
+            connection.in_scan_window = False
+            if not connection.handshake_complete:
+                self.remove_incomplete_attempt(connection)
 
-    def completed(self, conn: Conn) -> None:
-        key = (conn.dst, conn.dport)
-        left = self.failed[key] - 1
-        if left:
-            self.failed[key] = left
+    def remove_incomplete_attempt(self, connection: ConnectionAttempt) -> None:
+        # Called when an attempt completes or ages out. Remove the target key
+        # only after its last incomplete attempt leaves, preserving distinctness.
+        key = (connection.destination_ip, connection.destination_port)
+        remaining_attempts = self.incomplete_targets[key] - 1
+        if remaining_attempts:
+            self.incomplete_targets[key] = remaining_attempts
         else:
-            del self.failed[key]
+            del self.incomplete_targets[key]
 
 
 class ServiceWindow:
     """SYNs received by one (host, port) and how many of them completed."""
 
-    __slots__ = ("attempts", "completed")
+    # Flood detection combines all sources arriving at this service.
+    # len(attempts) - completed_count is the number still incomplete in the window.
+    # Grouping by port keeps a scan spread across ports from looking like one flood.
 
     def __init__(self):
         self.attempts = deque()
-        self.completed = 0
+        self.completed_count = 0
 
-    def add(self, conn: Conn) -> None:
-        self.attempts.append(conn)
-        conn.in_flood = True
+    def add(self, connection: ConnectionAttempt) -> None:
+        self.attempts.append(connection)
+        connection.in_flood_window = True
 
     def expire(self, cutoff: float) -> None:
         attempts = self.attempts
-        while attempts and attempts[0].ts < cutoff:
-            conn = attempts.popleft()
-            conn.in_flood = False
-            if conn.established:
-                self.completed -= 1
+        while attempts and attempts[0].timestamp < cutoff:
+            connection = attempts.popleft()
+            connection.in_flood_window = False
+            if connection.handshake_complete:
+                self.completed_count -= 1
 
 
 class ArpBinding:
-    __slots__ = ("mac", "trusted", "contender", "since", "changed_at")
-
+    # "trusted" starts as the first observed MAC, not an authenticated
+    # owner. "mac" is the latest claim; "contender" remembers a competing claimant.
+    # rules.arp_spoof() uses those roles to recognize claims switching back and forth.
     def __init__(self, mac: str, now: float):
         self.mac = mac          # most recent claim
         self.trusted = mac      # long-standing owner
@@ -88,69 +100,98 @@ class ArpBinding:
 
 
 class State:
-    def __init__(self, scan_window: float, flood_window: float, conn_timeout: float = 60.0):
+    def __init__(self, scan_window: float, flood_window: float, connection_timeout: float = 60.0):
         self.scan_window = scan_window
         self.flood_window = flood_window
-        self.conn_timeout = conn_timeout
-        self.conns: dict[tuple, Conn] = {}              # pending handshakes by (client, cport, server, sport)
+        self.connection_timeout = connection_timeout
+        # Look up a handshake by (client IP, client port, server IP, server port).
+        self.pending_connections: dict[tuple, ConnectionAttempt] = {}
         self.sources: dict[str, SourceWindow] = {}
         self.services: dict[tuple, ServiceWindow] = {}
         self.bindings: dict[str, ArpBinding] = {}
         self.mac_seen: dict[str, float] = {}            # last frame sent by each MAC
         self.mac_owner: dict[str, str] = {}             # first IP each MAC announced
 
-    def syn(self, p) -> tuple[SourceWindow, ServiceWindow]:
-        key = (p.src_ip, p.sport, p.dst_ip, p.dport)
-        conn = Conn(p.ts, p.src_ip, p.dst_ip, p.dport)
-        earlier = self.conns.get(key)
-        if earlier is not None and p.ts - earlier.ts <= self.conn_timeout:
-            conn.prev = earlier
-        self.conns[key] = conn
+    def record_syn(self, packet) -> tuple[SourceWindow, ServiceWindow]:
+        """Record an attempt in both traffic windows, then return those windows."""
+        # The four values distinguish simultaneous connections to
+        # the same server. Retries with the same tuple are linked so a successful
+        # handshake can mark the linked outstanding SYN attempts complete together.
+        key = (packet.source_ip, packet.source_port, packet.destination_ip, packet.destination_port)
+        connection = ConnectionAttempt(packet.timestamp, packet.source_ip, packet.destination_ip,
+            packet.destination_port)
+        earlier = self.pending_connections.get(key)
+        if earlier is not None and packet.timestamp - earlier.timestamp <= self.connection_timeout:
+            connection.previous_attempt = earlier
+        self.pending_connections[key] = connection
 
-        source = self.sources.get(p.src_ip)
+        source = self.sources.get(packet.source_ip)
         if source is None:
-            source = self.sources[p.src_ip] = SourceWindow()
-        source.expire(p.ts - self.scan_window)
-        source.add(conn)
+            source = SourceWindow()
+            self.sources[packet.source_ip] = source
+        # Expire before adding/checking: an old attempt must not inflate this rule.
+        source.expire(packet.timestamp - self.scan_window)
+        source.add(connection)
 
-        service_key = (p.dst_ip, p.dport)
+        service_key = (packet.destination_ip, packet.destination_port)
         service = self.services.get(service_key)
         if service is None:
-            service = self.services[service_key] = ServiceWindow()
-        service.expire(p.ts - self.flood_window)
-        service.add(conn)
+            service = ServiceWindow()
+            self.services[service_key] = service
+        service.expire(packet.timestamp - self.flood_window)
+        service.add(connection)
         return source, service
 
-    def synack(self, p) -> None:
-        conn = self.conns.get((p.dst_ip, p.dport, p.src_ip, p.sport))
-        if conn is not None:
-            conn.synack = True
+    def record_syn_ack(self, packet) -> None:
+        # The server reply travels in the opposite direction to the first SYN.
+        key = (packet.destination_ip, packet.destination_port, packet.source_ip, packet.source_port)
+        connection = self.pending_connections.get(key)
+        if connection is not None:
+            connection.syn_ack_seen = True
 
-    def ack(self, p) -> None:
+    def record_ack(self, packet) -> None:
         """The client's ACK after a SYN-ACK completes the handshake."""
-        key = (p.src_ip, p.sport, p.dst_ip, p.dport)
-        conn = self.conns.get(key)
-        if conn is None or not conn.synack:
+        # An arbitrary ACK is insufficient; a matching SYN and
+        # SYN-ACK must already have been seen. This is simplified tracking: it
+        # checks direction/flags, not TCP sequence or acknowledgment numbers.
+        # If the capture misses replies, legitimate connections can look incomplete.
+        key = (packet.source_ip, packet.source_port, packet.destination_ip, packet.destination_port)
+        connection = self.pending_connections.get(key)
+        if connection is None or not connection.syn_ack_seen:
             return
-        del self.conns[key]
-        while conn is not None:
-            if not conn.established:
-                conn.established = True
-                if conn.in_scan:
-                    self.sources[conn.src].completed(conn)
-                if conn.in_flood:
-                    self.services[(conn.dst, conn.dport)].completed += 1
-            conn.prev, conn = None, conn.prev
+        del self.pending_connections[key]
+        while connection is not None:
+            # Scan and flood windows can have different lengths. Only adjust a
+            # counter if this attempt is still in that window; otherwise its
+            # contribution has already expired. The loop then follows retry links.
+            if not connection.handshake_complete:
+                connection.handshake_complete = True
+                if connection.in_scan_window:
+                    self.sources[connection.source_ip].remove_incomplete_attempt(connection)
+                if connection.in_flood_window:
+                    service_key = (connection.destination_ip, connection.destination_port)
+                    self.services[service_key].completed_count += 1
+            previous_attempt = connection.previous_attempt
+            connection.previous_attempt = None
+            connection = previous_attempt
 
-    def rst(self, p) -> None:
-        self.conns.pop((p.src_ip, p.sport, p.dst_ip, p.dport), None)
-        self.conns.pop((p.dst_ip, p.dport, p.src_ip, p.sport), None)
+    def record_reset(self, packet) -> None:
+        # A refused connection is still incomplete for the scan and flood rules.
+        forward = (packet.source_ip, packet.source_port, packet.destination_ip, packet.destination_port)
+        reverse = (packet.destination_ip, packet.destination_port, packet.source_ip, packet.source_port)
+        self.pending_connections.pop(forward, None)
+        self.pending_connections.pop(reverse, None)
 
     def prune(self, now: float) -> None:
         """Drop idle entries so spoofed sources don't accumulate."""
-        cutoff = now - self.conn_timeout
-        for key in [k for k, c in self.conns.items() if c.ts < cutoff]:
-            del self.conns[key]
+        # Cleanup bounds the stored history; it does not classify traffic.
+        # Pending-handshake timeout and detection-window length are separate:
+        # forgetting a handshake does not remove still-recent incomplete evidence.
+        cutoff = now - self.connection_timeout
+        for key in list(self.pending_connections):
+            connection = self.pending_connections[key]
+            if connection.timestamp < cutoff:
+                del self.pending_connections[key]
         for table, window in ((self.sources, self.scan_window), (self.services, self.flood_window)):
             for key in list(table):
                 entry = table[key]

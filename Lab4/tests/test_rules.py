@@ -7,6 +7,10 @@ from ids.packets import ACK, SYN
 from ids.rules import Config
 from util import ATTACKER_MAC, GATEWAY_MAC, NEW_MAC, arp, handshake, refused, tcp
 
+# Controlled packet sequences exercise the real detector and its state updates.
+# These tests check individual rule behavior; evaluate.py scores whole captures
+# against their labeled events.
+
 ATTACKER, SERVER, GATEWAY = "10.0.0.66", "10.0.0.10", "10.0.0.1"
 
 
@@ -16,6 +20,8 @@ def config(**sections) -> Config:
 
 @pytest.fixture
 def detector():
+    # Deliberately small test thresholds make examples quick and easy to isolate.
+    # The command-line runner loads its settings from config.json instead.
     return Detector(config(port_scan={"window": 10, "threshold": 20},
                            syn_flood={"window": 5, "threshold": 100, "min_incomplete_ratio": 0.5},
                            arp_spoof={"stale_after": 30}))
@@ -24,12 +30,14 @@ def detector():
 # --- port scan ---
 
 def test_scan_of_closed_ports(detector):
+    # The 20th distinct port reaches this fixture's threshold.
+    # Later probes refresh the same finding and increase its peak evidence.
     for port in range(1, 41):
         refused(detector, port * 0.05, ATTACKER, SERVER, 40000 + port, port)
     [alert] = detector.alerts
     assert (alert.rule, alert.subtype, alert.severity) == ("port_scan", "portscan", "medium")
     assert (alert.actor, alert.target) == (ATTACKER, SERVER)
-    assert alert.ts == pytest.approx(20 * 0.05)          # fires on the 20th distinct port
+    assert alert.timestamp == pytest.approx(20 * 0.05)          # fires on the 20th distinct port
     assert alert.evidence["distinct_targets"] == 40      # and keeps counting
     assert alert.count == 21
 
@@ -49,6 +57,8 @@ def test_sweep_across_hosts(detector):
 
 
 def test_completed_connections_are_not_a_scan(detector):
+    # Many distinct ports alone are insufficient here: completed handshakes remove
+    # attempts from the incomplete-target count in State.record_ack().
     for port in range(1, 201):
         handshake(detector, port * 0.05, "10.0.0.12", "10.0.0.105", 40000 + port, 20000 + port)
     assert detector.alerts == []
@@ -63,13 +73,6 @@ def test_repeating_one_closed_port_is_not_a_scan(detector):
 def test_slow_scan_stays_under_the_window(detector):
     for port in range(1, 41):
         refused(detector, port * 2.0, ATTACKER, SERVER, 40000 + port, port)  # 5 ports per 10 s
-    assert detector.alerts == []
-
-
-def test_scan_allowlist():
-    detector = Detector(config(port_scan={"threshold": 20}, allowlist={"port_scan": [ATTACKER]}))
-    for port in range(1, 41):
-        refused(detector, port * 0.05, ATTACKER, SERVER, 40000 + port, port)
     assert detector.alerts == []
 
 
@@ -92,28 +95,34 @@ def test_flood_from_one_source_names_the_actor(detector):
 
 
 def test_flood_with_fixed_source_port(detector):
+    # Reusing the same connection tuple must still count repeated SYN attempts.
+    # SourceWindow counts distinct targets; ServiceWindow counts SYN volume.
     for i in range(300):
         detector.handle_info(tcp(i * 0.005, ATTACKER, SERVER, 1234, 80, SYN))
-    assert [a.rule for a in detector.alerts] == ["syn_flood"]
+    assert [alert.rule for alert in detector.alerts] == ["syn_flood"]
 
 
 def test_burst_of_completed_connections_is_not_a_flood(detector):
+    # Successful handshakes keep the incomplete ratio low despite the high rate,
+    # so this burst should not trigger the completion-aware flood rule.
     for i in range(300):
         handshake(detector, i * 0.005, f"45.1.0.{i % 250 + 1}", SERVER, 1024 + i, 443)
     assert detector.alerts == []
 
 
 def test_rate_only_rule_flags_the_same_burst():
+    # Removing the incomplete-share requirement flags the same benign pattern.
+    # This comparison explains why the SYN-flood rule needs more than a rate limit.
     detector = Detector(config(syn_flood={"threshold": 100, "min_incomplete_ratio": 0.0}))
     for i in range(300):
         handshake(detector, i * 0.005, f"45.1.0.{i % 250 + 1}", SERVER, 1024 + i, 443)
-    assert [a.rule for a in detector.alerts] == ["syn_flood"]
+    assert [alert.rule for alert in detector.alerts] == ["syn_flood"]
 
 
 def test_fast_scan_is_not_reported_as_a_flood(detector):
     for port in range(1, 401):
         refused(detector, port * 0.005, ATTACKER, SERVER, 40000 + port, port)
-    assert [a.rule for a in detector.alerts] == ["port_scan"]
+    assert [alert.rule for alert in detector.alerts] == ["port_scan"]
 
 
 def test_flood_below_the_rate_threshold(detector):
@@ -131,7 +140,7 @@ def learn_gateway(detector):
 
 def test_changed_address_while_the_owner_is_still_active(detector):
     learn_gateway(detector)
-    detector.handle_info(tcp(9.0, "8.8.8.8", "10.0.0.105", 443, 50000, ACK, src_mac=GATEWAY_MAC))
+    detector.handle_info(tcp(9.0, "8.8.8.8", "10.0.0.105", 443, 50000, ACK, source_mac=GATEWAY_MAC))
     detector.handle_info(arp(10.0, GATEWAY, ATTACKER_MAC))
     [alert] = detector.alerts
     assert (alert.rule, alert.subtype, alert.severity) == ("arp_spoof", "changed_address", "medium")
@@ -140,13 +149,15 @@ def test_changed_address_while_the_owner_is_still_active(detector):
 
 
 def test_flip_flop_escalates_to_high(detector):
+    # Owner -> contender -> owner -> contender. The returning owner is not a new
+    # attacker; the contender's repeated claim raises severity to high.
     learn_gateway(detector)
     detector.handle_info(arp(10.0, GATEWAY, ATTACKER_MAC))
     detector.handle_info(arp(12.0, GATEWAY, GATEWAY_MAC))   # the real gateway answers
     detector.handle_info(arp(14.0, GATEWAY, ATTACKER_MAC))  # poisoned again
     detector.handle_info(arp(16.0, GATEWAY, GATEWAY_MAC))
     detector.handle_info(arp(18.0, GATEWAY, ATTACKER_MAC))
-    assert [(a.subtype, a.severity) for a in detector.alerts] == [
+    assert [(alert.subtype, alert.severity) for alert in detector.alerts] == [
         ("changed_address", "medium"), ("flip_flop", "high")]
     assert detector.alerts[1].count == 3  # later flips extend the same alert
 
@@ -170,14 +181,16 @@ def test_arp_probe_and_repeats_are_ignored(detector):
 # --- alerts and host status ---
 
 def test_rules_fire_independently_for_the_same_host(detector):
+    # Evidence that simultaneous rules are retained instead of choosing one label.
+    # host_status() then reports the maximum severity across the active findings.
     learn_gateway(detector)
     for port in range(1, 41):
         refused(detector, 1 + port * 0.05, ATTACKER, SERVER, 40000 + port, port)
     detector.handle_info(arp(5.0, GATEWAY, ATTACKER_MAC))
-    assert sorted(a.rule for a in detector.alerts) == ["arp_spoof", "port_scan"]
+    assert sorted(alert.rule for alert in detector.alerts) == ["arp_spoof", "port_scan"]
     status = detector.host_status()
     assert status[ATTACKER]["status"] == "medium"
-    assert {a["rule"] for a in status[ATTACKER]["alerts"]} == {"arp_spoof", "port_scan"}
+    assert {alert["rule"] for alert in status[ATTACKER]["alerts"]} == {"arp_spoof", "port_scan"}
 
 
 def test_status_is_the_most_severe_active_alert_and_expires(detector):

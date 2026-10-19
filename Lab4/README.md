@@ -142,21 +142,32 @@ from the assessed detector. Three.js and real-traffic ingestion are not required
 | `ids/packets.py` | Frame to header record (timestamp, addresses, ports, TCP flags, ARP sender) |
 | `ids/state.py` | Per-host sliding windows, handshake tracking, IP-to-MAC table |
 | `ids/rules.py` | The three rules and their settings |
-| `ids/detector.py` | `handle(pkt)` pipeline and per-host status |
+| `ids/detector.py` | `handle(captured_packet)` pipeline and per-host status |
 | `ids/alerts.py` | Alert record, rate-limiting, JSON lines output |
 | `mock/` | Simulated LAN, background traffic, attacks, look-alikes, generator |
 | `evaluate.py` | Scoring against labels and the threshold sweep |
-| `config.json` | Thresholds, windows and allowlist (written by the sweep) |
+| `config.json` | Thresholds and windows (written by the sweep) |
 | `dashboard.py` | Exports timed, directed packet events and frozen detection snapshots |
 | `frontend/` | React playback, Canvas particles, SVG labels/charts, and frontend tests |
 | `start-dashboard.ps1` | Starts the dashboard and prepares missing reports/dependencies |
+
+To follow the backend, start at the packet loop in `run.py`. `Detector.handle`
+decodes one packet, and `handle_info` updates the traffic history and checks the
+relevant rules. New alerts return to the runner, which prints them. After the
+capture ends, it writes the full alert log and optional host-status file.
+
+For the detection logic, read `handle_tcp_packet`, `State.record_syn`, and the
+three functions in `ids/rules.py`. `packet.source_ip` is the sender,
+`packet.destination_port` is the receiving port, and `packet.timestamp` is
+capture time. Python uses these descriptive names; existing JSON reports keep
+their original field names, including `ts` for the alert timestamp.
 
 ## Rules
 
 | Rule | Fires when | Subtypes | Severity |
 |---|---|---|---|
 | `port_scan` | One source has uncompleted connection attempts to `threshold` distinct (host, port) pairs within `window` seconds | `portscan`, `portsweep` | medium |
-| `syn_flood` | One (host, port) receives `threshold` SYNs within `window` seconds and at least `min_incomplete_ratio` of the handshakes never complete | `single_source`, `many_sources` | high |
+| `syn_flood` | One (host, port) receives `threshold` SYNs within `window` seconds and at least `min_incomplete_ratio` of the handshakes are incomplete so far | `single_source`, `many_sources` | high |
 | `arp_spoof` | An IP address is claimed by a different MAC | `changed_address`, `flip_flop` | low, medium or high |
 
 For `arp_spoof`, a change is low if the previous MAC has been silent for more than `stale_after` seconds (likely replaced hardware), medium if it is still active, and high when the same MAC takes the address again after the owner reclaimed it.

@@ -10,3 +10,7 @@ frontend/dist/
 frontend/public/reports/
 frontend/.vite/
 frontend/.npm-cache/
+
+# Personal study checklist and saved progress
+/presentation-prep.html
+/lab4-checklist-progress*.json
